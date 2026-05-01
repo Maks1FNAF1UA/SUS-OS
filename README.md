@@ -1,6 +1,6 @@
-# OS Kernel Builder
+# SUS OS source code
 
-Simple x86 bootloader and kernel with build system for QEMU.
+Simple x86 bootloader and kernel with build system for users.
 
 ## Setup
 
@@ -69,5 +69,7 @@ make clean
 ## Notes
 
 - Kernel runs in 32-bit protected mode
-- Uses VGA for output
+- Uses VGA\LFB for output
 - Bootloader at 0x7C00, Kernel at 0x10000
+- this is beta so this os did not have graphical interface, only text
+- you can also run this on computer with img file
