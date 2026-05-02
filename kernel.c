@@ -233,6 +233,16 @@ void draw_filled_rectangle(int x, int y, int width, int height, uint8_t color) {
 }
 
 
+/* String comparison function for freestanding environment */
+int strcmp(const char* s1, const char* s2)
+{
+    while (*s1 && (*s1 == *s2)) {
+        s1++;
+        s2++;
+    }
+    return (unsigned char)*s1 - (unsigned char)*s2;
+}
+
 /* Utility: simple millisecond wait (busy-wait) */
 void wait_ms(uint32_t milliseconds)
 {
@@ -309,22 +319,315 @@ void emergency(const char* error_code) {
 }
 
 
-void real_hardware_shutdown() {
-    /* 
-       УВАГА: Це спрощений приклад. 
-       На реальному залізі значення SLP_TYP (0x2000) може бути іншим.
-       Воно береться з таблиці DSDT (об'єкт \_S5).
-    */
+typedef struct __attribute__((packed)) {
+    char signature[8];
+    uint8_t checksum;
+    char oemid[6];
+    uint8_t revision;
+    uint32_t rsdt_address;
+    uint32_t length;
+    uint64_t xsdt_address;
+    uint8_t extended_checksum;
+    uint8_t reserved[3];
+} acpi_rsdp_t;
 
-    // Спроба вимкнення через стандартний ACPI порт (якщо він 0x1000 чи 0x1800)
-    // 0x2000 — це біт SLP_EN (Sleep Enable) + типи сну для S5 (вимкнення)
-    outw(0xB004, 0x2000);  // Старий Intel
-    outw(0x604, 0x2000);   // Стандартний порт для багатьох чипсетів
-    outw(0x4004, 0x3400);  // Деякі типи платформ
+typedef struct __attribute__((packed)) {
+    char signature[4];
+    uint32_t length;
+    uint8_t revision;
+    uint8_t checksum;
+    char oemid[6];
+    char oem_table_id[8];
+    uint32_t oem_revision;
+    uint32_t creator_id;
+    uint32_t creator_revision;
+} acpi_sdt_header_t;
 
-    // Якщо ми все ще тут, пробуємо "жорсткий" метод через контролер живлення
-    // (працює на деяких ноутбуках)
-    outw(0xCF9, 0xE); // Це команда на Hard Reset / Power Off для багатьох систем Intel
+typedef struct __attribute__((packed)) {
+    acpi_sdt_header_t h;
+    uint32_t firmware_ctrl;
+    uint32_t dsdt;
+    uint8_t reserved;
+    uint8_t preferred_pm_profile;
+    uint16_t sci_int;
+    uint32_t smi_cmd;
+    uint8_t acpi_enable;
+    uint8_t acpi_disable;
+    uint8_t s4bios_req;
+    uint8_t pstate_cnt;
+    uint32_t pm1a_evt_blk;
+    uint32_t pm1b_evt_blk;
+    uint32_t pm1a_cnt_blk;
+    uint32_t pm1b_cnt_blk;
+    uint32_t pm2_cnt_blk;
+    uint32_t pm_tmr_blk;
+    uint32_t gpe0_blk;
+    uint32_t gpe1_blk;
+    uint8_t pm1_evt_len;
+    uint8_t pm1_cnt_len;
+    uint8_t pm2_cnt_len;
+    uint8_t pm_tmr_len;
+    uint8_t gpe0_blk_len;
+    uint8_t gpe1_blk_len;
+    uint8_t gpe1_base;
+    uint8_t cst_cnt;
+    uint16_t p_lvl2_lat;
+    uint16_t p_lvl3_lat;
+    uint16_t flush_size;
+    uint16_t flush_stride;
+    uint8_t duty_offset;
+    uint8_t duty_width;
+    uint8_t day_alrm;
+    uint8_t mon_alrm;
+    uint8_t century;
+    uint16_t iapc_boot_arch;
+    uint8_t reserved2;
+    uint32_t flags;
+    uint64_t reset_reg;
+    uint8_t reset_value;
+    uint8_t reserved3;
+    uint64_t x_firmware_ctrl;
+    uint64_t x_dsdt;
+    uint32_t x_pm1a_evt_blk;
+    uint32_t x_pm1b_evt_blk;
+    uint32_t x_pm1a_cnt_blk;
+    uint32_t x_pm1b_cnt_blk;
+    uint32_t x_pm2_cnt_blk;
+    uint32_t x_pm_tmr_blk;
+    uint32_t x_gpe0_blk;
+    uint32_t x_gpe1_blk;
+    uint8_t x_pm1_evt_len;
+    uint8_t x_pm1_cnt_len;
+    uint8_t x_pm2_cnt_len;
+    uint8_t x_pm_tmr_len;
+    uint8_t x_gpe0_blk_len;
+    uint8_t x_gpe1_blk_len;
+    uint8_t x_gpe1_base;
+    uint8_t reserved4;
+} acpi_fadt_t;
+
+static int acpi_memcmp(const void* a, const void* b, size_t count)
+{
+    const uint8_t* pa = (const uint8_t*)a;
+    const uint8_t* pb = (const uint8_t*)b;
+    while (count--) {
+        if (*pa != *pb) {
+            return *pa - *pb;
+        }
+        pa++;
+        pb++;
+    }
+    return 0;
+}
+
+static uint8_t acpi_checksum(const void* addr, size_t len)
+{
+    const uint8_t* bytes = (const uint8_t*)addr;
+    uint8_t sum = 0;
+    for (size_t i = 0; i < len; i++) {
+        sum += bytes[i];
+    }
+    return sum;
+}
+
+static const acpi_rsdp_t* acpi_find_rsdp(void)
+{
+    const char rsdp_sig[8] = {'R', 'S', 'D', ' ', 'P', 'T', 'R', ' '};
+    const uint16_t* ebda_ptr = (const uint16_t*)0x040E;
+    uint16_t ebda_seg;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Warray-bounds"
+    __asm__ volatile ("movw %1, %0" : "=r" (ebda_seg) : "m" (*ebda_ptr));
+#pragma GCC diagnostic pop
+    uint32_t ebda = (uint32_t)ebda_seg << 4;
+
+    if (ebda >= 0x00080000 && ebda < 0x000A0000) {
+        for (uint32_t addr = ebda; addr < ebda + 1024; addr += 16) {
+            const acpi_rsdp_t* rsdp = (const acpi_rsdp_t*)(uintptr_t)addr;
+            if (acpi_memcmp(rsdp->signature, rsdp_sig, 8) == 0 && acpi_checksum(rsdp, 20) == 0) {
+                return rsdp;
+            }
+        }
+    }
+
+    for (uint32_t addr = 0x000E0000; addr < 0x00100000; addr += 16) {
+        const acpi_rsdp_t* rsdp = (const acpi_rsdp_t*)(uintptr_t)addr;
+        if (acpi_memcmp(rsdp->signature, rsdp_sig, 8) == 0 && acpi_checksum(rsdp, 20) == 0) {
+            return rsdp;
+        }
+    }
+
+    return NULL;
+}
+
+static const acpi_sdt_header_t* acpi_find_table(const char* signature)
+{
+    const acpi_rsdp_t* rsdp = acpi_find_rsdp();
+    if (!rsdp) {
+        return NULL;
+    }
+
+    if (rsdp->revision < 2 || rsdp->xsdt_address == 0) {
+        const acpi_sdt_header_t* rsdt = (const acpi_sdt_header_t*)(uintptr_t)rsdp->rsdt_address;
+        if (!rsdt) {
+            return NULL;
+        }
+        size_t entries = (rsdt->length - sizeof(acpi_sdt_header_t)) / 4;
+        const uint32_t* table_entries = (const uint32_t*)((uintptr_t)rsdt + sizeof(acpi_sdt_header_t));
+        for (size_t i = 0; i < entries; i++) {
+            const acpi_sdt_header_t* table = (const acpi_sdt_header_t*)(uintptr_t)table_entries[i];
+            if (acpi_memcmp(table->signature, signature, 4) == 0) {
+                return table;
+            }
+        }
+    } else {
+        const acpi_sdt_header_t* xsdt = (const acpi_sdt_header_t*)(uintptr_t)rsdp->xsdt_address;
+        if (!xsdt) {
+            return NULL;
+        }
+        size_t entries = (xsdt->length - sizeof(acpi_sdt_header_t)) / 8;
+        const uint64_t* table_entries = (const uint64_t*)((uintptr_t)xsdt + sizeof(acpi_sdt_header_t));
+        for (size_t i = 0; i < entries; i++) {
+            const acpi_sdt_header_t* table = (const acpi_sdt_header_t*)(uintptr_t)table_entries[i];
+            if (acpi_memcmp(table->signature, signature, 4) == 0) {
+                return table;
+            }
+        }
+    }
+
+    return NULL;
+}
+
+static int acpi_parse_s5(const acpi_sdt_header_t* dsdt, uint8_t* slp_typa, uint8_t* slp_typb)
+{
+    const uint8_t* data = (const uint8_t*)dsdt;
+    const uint8_t* end = data + dsdt->length;
+
+    for (const uint8_t* ptr = data; ptr + 4 < end; ptr++) {
+        if (ptr[0] == '_' && ptr[1] == 'S' && ptr[2] == '5' && ptr[3] == '_') {
+            const uint8_t* p = ptr + 4;
+            while (p < end && *p != 0x12) {
+                p++;
+            }
+            if (p >= end) {
+                continue;
+            }
+            p++;
+            if (p >= end) {
+                continue;
+            }
+
+            uint8_t length_byte = *p++;
+            if (length_byte & 0x80) {
+                uint32_t byte_count = (length_byte >> 6) & 0x03;
+                for (uint32_t i = 0; i < byte_count && p < end; i++) {
+                    p++;
+                }
+            }
+
+            if (p >= end) {
+                continue;
+            }
+
+            if (*p == 0x0A) {
+                p++;
+                if (p >= end) {
+                    continue;
+                }
+                *slp_typa = *p++;
+            } else if (*p == 0x0B) {
+                p++;
+                if (p + 1 >= end) {
+                    continue;
+                }
+                *slp_typa = (uint8_t)(p[0] | (p[1] << 8));
+                p += 2;
+            } else {
+                continue;
+            }
+
+            if (p >= end) {
+                continue;
+            }
+
+            if (*p == 0x0A) {
+                p++;
+                if (p >= end) {
+                    continue;
+                }
+                *slp_typb = *p;
+            } else if (*p == 0x0B) {
+                p++;
+                if (p + 1 >= end) {
+                    continue;
+                }
+                *slp_typb = (uint8_t)(p[0] | (p[1] << 8));
+            } else {
+                continue;
+            }
+
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
+static int acpi_do_shutdown(void)
+{
+    const acpi_fadt_t* fadt = (const acpi_fadt_t*)acpi_find_table("FACP");
+    if (!fadt) {
+        return -1;
+    }
+
+    const acpi_sdt_header_t* dsdt = NULL;
+    if (fadt->x_dsdt) {
+        dsdt = (const acpi_sdt_header_t*)(uintptr_t)fadt->x_dsdt;
+    } else {
+        dsdt = (const acpi_sdt_header_t*)(uintptr_t)fadt->dsdt;
+    }
+    if (!dsdt) {
+        return -1;
+    }
+
+    uint8_t slp_typa = 0;
+    uint8_t slp_typb = 0;
+    if (acpi_parse_s5(dsdt, &slp_typa, &slp_typb) != 0) {
+        return -1;
+    }
+
+    uint16_t pm1a = (uint16_t)fadt->pm1a_cnt_blk;
+    uint16_t pm1b = (uint16_t)fadt->pm1b_cnt_blk;
+    uint16_t sleep_value_a = (uint16_t)((slp_typa << 10) | (1 << 13));
+    uint16_t sleep_value_b = (uint16_t)((slp_typb << 10) | (1 << 13));
+
+    if (pm1a) {
+        outw(pm1a, sleep_value_a);
+    }
+    if (pm1b) {
+        outw(pm1b, sleep_value_b);
+    }
+
+    return 0;
+}
+
+void real_hardware_shutdown(void) {
+    __asm__ volatile ("cli");
+
+    if (acpi_do_shutdown() == 0) {
+        for (;;) {
+            __asm__ volatile ("hlt");
+        }
+    }
+
+    outw(0xB004, 0x2000);
+    outw(0x604, 0x2000);
+    outw(0x4004, 0x3400);
+    outb(0x02, 0xCF9);
+
+    for (;;) {
+        __asm__ volatile ("hlt");
+    }
 }
 
 
@@ -379,36 +682,44 @@ void input_string(char* buffer, size_t max_length)
 /* Kernel main entry point - called by bootloader */
 void kernel_main(void)
 {
+    /* Kernel initialization and loading messages */
     print_at(0, 0, "SUS OS Kernel Loading...", VGA_COLOR_RED, VGA_COLOR_GREEN);
     wait_ms(1000);
-    print_at(1, 0, "Initializing VGA text mode...", VGA_COLOR_YELLOW, VGA_COLOR_BLUE);
+    print_at(1, 0, "Initializing VGA graphics mode...", VGA_COLOR_YELLOW, VGA_COLOR_BLUE);
     wait_ms(1000);
-    print_at(2, 0, "Setting up graphics mode...", VGA_COLOR_WHITE, VGA_COLOR_CYAN);
+    print_at(2, 0, "Setting up keyboard input...", VGA_COLOR_WHITE, VGA_COLOR_CYAN);
     wait_ms(1000);
     print_at(3, 0, "!!!ALL LOADED SUCCESSFULLY!!!", VGA_COLOR_GREEN, VGA_COLOR_BLACK);
     print_at(4, 0, "Clearing screen...", VGA_COLOR_GREEN, VGA_COLOR_BLACK);
     wait_ms(2000);
     print_clear_screen(VGA_COLOR_BLACK);
-    print_at(10, 30 - 17, "Welcome to the SUS OS!", VGA_COLOR_RED, VGA_COLOR_BLACK);
-    print_at(12, 35 - 17, "1. Boot System", VGA_COLOR_LIGHT_BLUE, VGA_COLOR_BLACK);
-    print_at(13, 35 - 17, "2. Shutdown", VGA_COLOR_LIGHT_BLUE, VGA_COLOR_BLACK);
-    print_at(20, 35 - 17, "ENTER OPTION: ", VGA_COLOR_LIGHT_BLUE, VGA_COLOR_BLACK);
+
+    /* Boot menu - choose what to run */
+    print_at(10, 30 - 17, "SUS OS Boot Menu", VGA_COLOR_CYAN, VGA_COLOR_BLACK);
+    print_at(12, 35 - 17, "1. Boot", VGA_COLOR_LIGHT_BLUE, VGA_COLOR_BLACK);
+    print_at(13, 35 - 17, "2. Shell", VGA_COLOR_LIGHT_BLUE, VGA_COLOR_BLACK);
+    print_at(14, 35 - 17, "3. Shutdown", VGA_COLOR_LIGHT_BLUE, VGA_COLOR_BLACK);        print_at(20, 35 - 17, "ENTER OPTION: ", VGA_COLOR_LIGHT_BLUE, VGA_COLOR_BLACK);
+
     uint8_t key = input_char();           /* Get one keystroke */
-    char buffer[32];
-    input_string(buffer, sizeof(buffer)); /* Read line from keyboard */
-    if (key == 0x02) { /* Enter key */
-        print_clear_screen(VGA_COLOR_BLACK);
-        print_at(22, 30 - 10, "You booted the system up!", VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
-        print_at(23, 25 - 10, "But there is nothing to see here!", VGA_COLOR_LIGHT_GREEN, VGA_COLOR_BLACK);
-    } else if (key == 0x03) { /* Enter key */
-        print_clear_screen(VGA_COLOR_BLACK);
-        print_at(22, 30 - 10, "Shutting down", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
-        wait_ms(2000);
-        real_hardware_shutdown();
-    } else if (key == 0x04) { /* Enter key */
-       emergency("DEV TEST");
-    } else {
-        print_at(22, 30 - 10, "Invalid input!", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+    while (key == 0x02 || key == 0x03 || key == 0x04) {
+        if (key == 0x02) { /* 1 key - Boot GUI */
+            print_clear_screen(VGA_COLOR_BLACK);
+            start_desktop();
+            key = 0;
+        } else if (key == 0x03) { /* 2 key - Shell */
+            print_clear_screen(VGA_COLOR_BLACK);
+            start_shell();
+        } else if (key == 0x04) { /* 3 key - Shutdown */
+            print_clear_screen(VGA_COLOR_BLACK);
+            print_at(10, 30 - 10, "Shutting down...", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            wait_ms(2000);
+            real_hardware_shutdown();
+        } else {
+            print_clear_screen(VGA_COLOR_BLACK);
+            print_at(10, 30 - 10, "Invalid input!", VGA_COLOR_LIGHT_RED, VGA_COLOR_BLACK);
+            wait_ms(1000);
+            print_clear_screen(VGA_COLOR_BLACK);
+        }
     }
 
     /* Infinite loop */

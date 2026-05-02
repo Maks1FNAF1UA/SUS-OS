@@ -43,8 +43,13 @@ void draw_filled_rectangle(int x, int y, int width, int height, uint8_t color);
 void wait_ms(uint32_t milliseconds);
 uint8_t input_char(void);
 void input_string(char* buffer, size_t max_length);
+int strcmp(const char* s1, const char* s2);
+void real_hardware_shutdown(void);
 
 /* Kernel entry point */
 void kernel_main(void);
+void start_shell(void);
+void start_desktop(void);
+
 
 #endif

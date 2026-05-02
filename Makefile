@@ -15,12 +15,14 @@ ASFLAGS = -f bin
 # Output files
 BOOT_BIN = boot.bin
 KERNEL_OBJ = kernel.o
+GUI_OBJ = gui.o
+SHELL_OBJ = shell.o
 KERNEL_ELF = kernel.elf
 KERNEL_BIN = kernel.bin
 OS_IMG = os.img
 
 # Build targets
-.PHONY: all clean run
+.PHONY: all clean run debug
 
 all: $(OS_IMG)
 
@@ -32,9 +34,17 @@ $(BOOT_BIN): boot.asm
 $(KERNEL_OBJ): kernel.c kernel.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# Link kernel ELF
-$(KERNEL_ELF): $(KERNEL_OBJ)
-	$(LD) $(LDFLAGS) $< -o $@
+# Compile GUI C code
+$(GUI_OBJ): gui.c kernel.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# Compile shell C code
+$(SHELL_OBJ): shell.c kernel.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+# Link kernel ELF (ВАЖЛИВО: kernel.o перший)
+$(KERNEL_ELF): $(KERNEL_OBJ) $(GUI_OBJ) $(SHELL_OBJ)
+	$(LD) $(LDFLAGS) $(KERNEL_OBJ) $(GUI_OBJ) $(SHELL_OBJ) -o $@
 
 # Convert kernel ELF to raw binary
 $(KERNEL_BIN): $(KERNEL_ELF)
@@ -56,4 +66,4 @@ debug: $(OS_IMG)
 
 # Clean build artifacts
 clean:
-	rm -f $(BOOT_BIN) $(KERNEL_OBJ) $(KERNEL_ELF) $(KERNEL_BIN) $(OS_IMG)
+	rm -f $(BOOT_BIN) $(KERNEL_OBJ) $(GUI_OBJ) $(SHELL_OBJ) $(KERNEL_ELF) $(KERNEL_BIN) $(OS_IMG)
